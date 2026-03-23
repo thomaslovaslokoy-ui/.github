@@ -62,17 +62,25 @@ runs:
       env:
         FILTER: ${{ inputs.filter }}
       run: |
-        echo "pnpm-filter-args=$(jq -rn --arg filter "$FILTER" '$filter | split(" ") | map(select(. != "")) | map("--filter " + .) | join(" ")')" >> "$GITHUB_OUTPUT"
+        # Emit a JSON array of arguments, e.g. ["--filter","a","--filter","b"].
+        # Using a JSON array (rather than a space-joined string) means the Install
+        # step can deserialize it into a bash array and expand each element with
+        # proper quoting, preventing shell metacharacters in filter names from
+        # being interpreted as commands.
+        args_json=$(jq -rn --arg filter "$FILTER" \
+          '[$filter | split(" ") | .[] | select(. != "")] | map(["--filter", .]) | flatten | @json')
+        echo "pnpm-filter-args=$args_json" >> "$GITHUB_OUTPUT"
 
     - name: Install dependencies
       shell: bash
       run: |
         pnpm config set //vercel-private-registry.vercel.sh/:_authToken "$VERCEL_PRIVATE_REGISTRY_TOKEN"
-        # PNPM_FILTER_ARGS is intentionally unquoted: it contains multiple --filter <pkg>
-        # arguments that must be word-split into separate flags.
-        # shellcheck disable=SC2086
-        pnpm $PNPM_FILTER_ARGS install --frozen-lockfile
+        # Deserialize the JSON array into a bash array so each argument is a
+        # separate quoted token. This prevents any shell metacharacters that
+        # might appear in a filter name from being interpreted by the shell.
+        mapfile -t filter_args < <(jq -r '.[]' <<< "$PNPM_FILTER_ARGS_JSON")
+        pnpm "${filter_args[@]}" install --frozen-lockfile
       env:
         NODE_AUTH_TOKEN: ${{ inputs.npm-token }}
         VERCEL_PRIVATE_REGISTRY_TOKEN: ${{ inputs.vercel-private-registry-token }}
-        PNPM_FILTER_ARGS: ${{ steps.parse-filter.outputs.pnpm-filter-args }}
+        PNPM_FILTER_ARGS_JSON: ${{ steps.parse-filter.outputs.pnpm-filter-args }}
